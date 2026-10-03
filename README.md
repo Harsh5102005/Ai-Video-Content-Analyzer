@@ -1,6 +1,6 @@
-# AI Video Assistant
+# AI Video Content Analyzer
 
-AI Video Assistant is a Streamlit application that turns YouTube videos or local audio/video files into an English transcript, professional summary, action items, key decisions, open questions, and a transcript-grounded chat experience.
+AI Video Content Analyzer is a Streamlit application that turns YouTube videos or local audio/video files into an English transcript, professional summary, action items, key decisions, open questions, and a transcript-grounded chat experience.
 
 ## Features
 
@@ -59,8 +59,8 @@ The current code uses CUDA for Whisper and embeddings, so an NVIDIA GPU with CUD
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/harsh5102005/Ai-Video-Assistant.git
-cd Ai-Video-Assistant
+git clone https://github.com/harsh5102005/Ai-Video-Content-Analyzer.git
+cd Ai-Video-Content-Analyzer
 ```
 
 2. Create and activate a virtual environment:
