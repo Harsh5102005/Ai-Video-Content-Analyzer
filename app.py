@@ -1,158 +1,321 @@
+"""
+app.py
+------
+AI Video Content Analyzer — Streamlit UI.
+
+Run with:  streamlit run app.py
+"""
+
+import logging
 import os
 import re
 import tempfile
-from html import escape
 from datetime import datetime
+from html import escape
+from io import BytesIO
 
 import streamlit as st
 from dotenv import load_dotenv
 
-from utils.audio_processing import process_input
-from core.transcribe import transcribe_all
-from core.summarize import summarize, generate_title
 from core.extractor import extract_action_items, extract_key_decisions, extract_questions
 from core.rag_engine import build_rag_chain, ask_question
+from core.summarize import generate_title, summarize
+from core.transcribe import transcribe_all
+from utils.audio_processing import cleanup_audio_files, process_input
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
+# ── Streamlit page config ─────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="AI Video Assistant",
+    page_title="AI Video Content Analyzer",
     page_icon="🎬",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-
+# ── CSS ───────────────────────────────────────────────────────────────────────
 APP_CSS = """
 <style>
-    .main .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
-        max-width: 1280px;
-    }
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
 
-    [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #0f172a 0%, #111827 100%);
-    }
+*, *::before, *::after { box-sizing: border-box; }
 
-    [data-testid="stSidebar"] * {
-        color: #f8fafc;
-    }
+html, body, [class*="css"] {
+    font-family: 'Inter', sans-serif;
+}
 
-    [data-testid="stSidebar"] .stButton > button {
-        border: 0;
-        font-weight: 700;
-    }
+/* ── Hide Streamlit chrome ── */
+#MainMenu, footer, header { visibility: hidden; }
+.stDeployButton { display: none; }
 
-    .hero {
-        padding: 1.6rem 1.8rem;
-        border: 1px solid #e5e7eb;
-        border-radius: 18px;
-        color: #0f172a;
-        background:
-            radial-gradient(circle at top right, rgba(20, 184, 166, .16), transparent 28rem),
-            linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
-        margin-bottom: 1.2rem;
-    }
+/* ── Global background ── */
+.stApp {
+    background: #0a0f1e;
+}
 
-    .hero h1 {
-        margin: 0;
-        color: #0f172a;
-        font-size: clamp(2rem, 4vw, 3.5rem);
-        font-weight: 800;
-        line-height: 1.05;
-        letter-spacing: 0;
-    }
+/* ── Main container ── */
+.main .block-container {
+    padding: 1.5rem 2rem 3rem;
+    max-width: 1400px;
+}
 
-    .hero p {
-        max-width: 780px;
-        margin: .8rem 0 0;
-        color: #475569;
-        font-size: 1.05rem;
-    }
+/* ── Sidebar ── */
+[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #0d1424 0%, #111827 100%);
+    border-right: 1px solid rgba(99,102,241,.15);
+}
 
-    .stat-grid {
-        display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: .8rem;
-        margin: 1rem 0 1.2rem;
-    }
+[data-testid="stSidebar"] * { color: #e2e8f0 !important; }
 
-    .stat-card {
-        border: 1px solid #e5e7eb;
-        border-radius: 14px;
-        padding: 1rem;
-        color: #0f172a;
-        background: #ffffff;
-    }
+[data-testid="stSidebar"] .stButton > button {
+    background: linear-gradient(135deg, #6366f1, #8b5cf6) !important;
+    color: #ffffff !important;
+    border: none !important;
+    border-radius: 10px !important;
+    font-weight: 700 !important;
+    letter-spacing: .02em;
+    transition: opacity .2s, transform .15s;
+}
+[data-testid="stSidebar"] .stButton > button:hover {
+    opacity: .9;
+    transform: translateY(-1px);
+}
 
-    .stat-label {
-        color: #64748b;
-        font-size: .78rem;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: .04em;
-    }
+[data-testid="stSidebar"] .stButton > button:disabled {
+    background: rgba(99,102,241,.3) !important;
+    cursor: not-allowed !important;
+    transform: none !important;
+}
 
-    .stat-value {
-        color: #0f172a;
-        font-size: 1.45rem;
-        font-weight: 800;
-        margin-top: .2rem;
-    }
+/* ── Hero banner ── */
+.hero {
+    position: relative;
+    overflow: hidden;
+    padding: 2.4rem 2.8rem;
+    border-radius: 20px;
+    background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #0f172a 100%);
+    border: 1px solid rgba(99,102,241,.25);
+    margin-bottom: 1.6rem;
+}
+.hero::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background:
+        radial-gradient(circle at 80% 20%, rgba(99,102,241,.20) 0%, transparent 50%),
+        radial-gradient(circle at 20% 80%, rgba(139,92,246,.15) 0%, transparent 50%);
+    pointer-events: none;
+}
+.hero-badge {
+    display: inline-block;
+    padding: .28rem .75rem;
+    background: rgba(99,102,241,.18);
+    border: 1px solid rgba(99,102,241,.4);
+    border-radius: 999px;
+    font-size: .72rem;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: #a5b4fc;
+    margin-bottom: .9rem;
+}
+.hero h1 {
+    margin: 0;
+    font-size: clamp(1.8rem, 3.5vw, 3.2rem);
+    font-weight: 900;
+    line-height: 1.1;
+    background: linear-gradient(135deg, #ffffff 0%, #c7d2fe 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+.hero p {
+    max-width: 700px;
+    margin: .9rem 0 0;
+    color: #94a3b8;
+    font-size: 1.05rem;
+    line-height: 1.65;
+}
 
-    .panel {
-        border: 1px solid #e5e7eb;
-        border-radius: 16px;
-        padding: 1.1rem 1.2rem;
-        color: #0f172a;
-        background: #ffffff;
-        height: 100%;
-    }
+/* ── Stat grid ── */
+.stat-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 1rem;
+    margin: 1.4rem 0 1.6rem;
+}
+.stat-card {
+    position: relative;
+    overflow: hidden;
+    padding: 1.2rem 1.4rem;
+    border-radius: 16px;
+    background: rgba(255,255,255,.03);
+    border: 1px solid rgba(255,255,255,.08);
+    transition: border-color .2s, transform .2s;
+}
+.stat-card:hover {
+    border-color: rgba(99,102,241,.5);
+    transform: translateY(-2px);
+}
+.stat-label {
+    font-size: .7rem;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: #64748b;
+}
+.stat-value {
+    font-size: 1.55rem;
+    font-weight: 800;
+    color: #e2e8f0;
+    margin-top: .25rem;
+}
+.stat-icon {
+    position: absolute;
+    right: 1.1rem;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 1.7rem;
+    opacity: .2;
+}
 
-    .panel h3 {
-        margin-top: 0;
-        color: #0f172a;
-        font-weight: 800;
-    }
+/* ── Feature card (landing) ── */
+.feature-card {
+    padding: 1.5rem 1.6rem;
+    border-radius: 18px;
+    background: rgba(255,255,255,.03);
+    border: 1px solid rgba(255,255,255,.08);
+    height: 100%;
+    transition: border-color .25s, transform .2s;
+}
+.feature-card:hover {
+    border-color: rgba(99,102,241,.45);
+    transform: translateY(-3px);
+}
+.feature-card .step-num {
+    font-size: .7rem;
+    font-weight: 800;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: #818cf8;
+    margin-bottom: .4rem;
+}
+.feature-card h3 {
+    margin: 0 0 .5rem;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: #e2e8f0;
+}
+.feature-card p {
+    margin: 0;
+    color: #64748b;
+    font-size: .92rem;
+    line-height: 1.6;
+}
+.feature-emoji {
+    font-size: 2rem;
+    margin-bottom: .7rem;
+}
 
-    .panel p {
-        color: #334155;
-    }
+/* ── Export button strip ── */
+.stDownloadButton > button {
+    background: rgba(99,102,241,.12) !important;
+    border: 1px solid rgba(99,102,241,.35) !important;
+    color: #a5b4fc !important;
+    border-radius: 10px !important;
+    font-weight: 600 !important;
+    transition: background .2s, transform .15s !important;
+}
+.stDownloadButton > button:hover {
+    background: rgba(99,102,241,.25) !important;
+    transform: translateY(-1px);
+}
 
-    .muted {
-        color: #64748b !important;
-    }
+/* ── Tabs ── */
+[data-baseweb="tab-list"] {
+    background: rgba(255,255,255,.04) !important;
+    border-radius: 12px !important;
+    gap: .35rem !important;
+    padding: .3rem .4rem !important;
+}
+[data-baseweb="tab"] {
+    border-radius: 9px !important;
+    color: #94a3b8 !important;
+    font-weight: 600 !important;
+    font-size: .92rem !important;
+    transition: background .2s, color .2s !important;
+}
+[aria-selected="true"][data-baseweb="tab"] {
+    background: linear-gradient(135deg, #6366f1, #8b5cf6) !important;
+    color: #ffffff !important;
+}
 
-    @media (max-width: 900px) {
-        .stat-grid {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-        }
-    }
+/* ── Text areas ── */
+.stTextArea textarea {
+    background: rgba(255,255,255,.04) !important;
+    border: 1px solid rgba(255,255,255,.1) !important;
+    color: #e2e8f0 !important;
+    border-radius: 12px !important;
+    font-size: .9rem !important;
+}
 
-    @media (max-width: 560px) {
-        .stat-grid {
-            grid-template-columns: 1fr;
-        }
-    }
+/* ── Chat messages ── */
+[data-testid="stChatMessage"] {
+    border-radius: 14px !important;
+    border: 1px solid rgba(255,255,255,.07) !important;
+}
+
+/* ── Sample question buttons ── */
+.sample-btn > button {
+    background: rgba(99,102,241,.08) !important;
+    border: 1px solid rgba(99,102,241,.25) !important;
+    color: #a5b4fc !important;
+    border-radius: 9px !important;
+    font-size: .85rem !important;
+    font-weight: 500 !important;
+    transition: background .2s !important;
+}
+.sample-btn > button:hover {
+    background: rgba(99,102,241,.2) !important;
+}
+
+/* ── Responsive ── */
+@media (max-width: 900px) {
+    .stat-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 560px) {
+    .stat-grid { grid-template-columns: 1fr; }
+    .hero { padding: 1.5rem 1.4rem; }
+}
 </style>
 """
-
 st.markdown(APP_CSS, unsafe_allow_html=True)
 
 
-def safe_filename(value: str, fallback: str = "video_assistant_report") -> str:
-    cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "_", value or fallback).strip("_")
-    return cleaned[:80] or fallback
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def safe_filename(value: str, fallback: str = "ai_video_report") -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_\-]+", "_", value or fallback).strip("_")
+    return (cleaned[:80] or fallback).lower()
 
 
 def transcript_stats(transcript: str) -> dict:
     words = re.findall(r"\b\w+\b", transcript or "")
     minutes = max(1, round(len(words) / 150)) if words else 0
+    sentences = len(re.findall(r"[.!?]+", transcript or ""))
     return {
         "words": len(words),
         "characters": len(transcript or ""),
         "reading_time": minutes,
+        "sentences": sentences,
     }
 
 
@@ -160,57 +323,80 @@ def build_markdown_report(result: dict) -> str:
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M")
     return f"""# {result["title"]}
 
-Generated: {created_at}
+> Generated by AI Video Content Analyzer on {created_at}
 
-## Summary
+---
+
+## 📋 Summary
 
 {result["summary"]}
 
-## Action Items
+---
+
+## ✅ Action Items
 
 {result["action_item"]}
 
-## Key Decisions
+---
+
+## 🔑 Key Decisions
 
 {result["key_decisions"]}
 
-## Open Questions
+---
+
+## ❓ Open Questions
 
 {result["open_questions"]}
 
-## Transcript
+---
+
+## 📝 Full Transcript
 
 {result["transcript"]}
 """
 
 
-def run_pipeline(source: str, language: str = "english", progress_cb=None):
-    def step(message: str):
-        if progress_cb:
-            progress_cb(message)
+def build_txt_transcript(result: dict) -> str:
+    return result["transcript"]
 
-    step("Preparing source")
+
+# ── Pipeline ─────────────────────────────────────────────────────────────────
+
+def run_pipeline(source: str, language: str = "english", progress_cb=None):
+    """Execute the full analysis pipeline and return a result dict."""
+
+    def step(msg: str):
+        logger.info(msg)
+        if progress_cb:
+            progress_cb(msg)
+
+    step("⚙️  Preparing audio source …")
     chunks = process_input(source)
 
-    step("Transcribing audio")
-    transcript = transcribe_all(chunks, translate=(language.lower() in ["hindi", "hinglish"]))
+    step("🎙️  Transcribing audio with Whisper …")
+    translate = language.lower() in {"hindi", "hinglish"}
+    transcript = transcribe_all(chunks, translate=translate)
 
-    step("Generating meeting title")
+    # Clean up temp chunks after transcription
+    cleanup_audio_files(chunks)
+
+    step("🏷️  Generating meeting title …")
     title = generate_title(transcript)
 
-    step("Writing summary")
+    step("📋  Writing professional summary …")
     summary = summarize(transcript)
 
-    step("Finding action items")
+    step("✅  Extracting action items …")
     action_item = extract_action_items(transcript)
 
-    step("Finding key decisions")
-    decision = extract_key_decisions(transcript)
+    step("🔑  Identifying key decisions …")
+    key_decisions = extract_key_decisions(transcript)
 
-    step("Finding open questions")
-    questions = extract_questions(transcript)
+    step("❓  Finding open questions …")
+    open_questions = extract_questions(transcript)
 
-    step("Building chat index")
+    step("🧠  Building transcript chat index …")
     rag_chain = build_rag_chain(transcript)
 
     return {
@@ -218,303 +404,396 @@ def run_pipeline(source: str, language: str = "english", progress_cb=None):
         "transcript": transcript,
         "summary": summary,
         "action_item": action_item,
-        "key_decisions": decision,
-        "open_questions": questions,
+        "key_decisions": key_decisions,
+        "open_questions": open_questions,
         "rag_chain": rag_chain,
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "language": language,
     }
 
 
-def init_state():
+# ── Session state init ────────────────────────────────────────────────────────
+
+def _init_state():
     defaults = {
         "result": None,
         "chat_history": [],
         "processing": False,
         "status_history": [],
         "pending_question": None,
+        "error_message": None,
     }
-    for key, value in defaults.items():
+    for key, val in defaults.items():
         if key not in st.session_state:
-            st.session_state[key] = value
+            st.session_state[key] = val
 
 
-init_state()
+_init_state()
 
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.title("AI Video Assistant")
-    st.caption("Transcribe, summarize, extract decisions, and chat with long videos.")
-
+    st.markdown(
+        """
+        <div style="display:flex;align-items:center;gap:.6rem;margin-bottom:.3rem;">
+            <span style="font-size:1.7rem;">🎬</span>
+            <span style="font-size:1.1rem;font-weight:800;color:#e2e8f0;">AI Video Analyzer</span>
+        </div>
+        <p style="color:#64748b;font-size:.83rem;margin:0 0 .5rem;">
+            Transcribe · Summarize · Chat
+        </p>
+        """,
+        unsafe_allow_html=True,
+    )
     st.divider()
 
     input_mode = st.radio(
-        "Source",
+        "📂 Source type",
         ["YouTube URL", "Upload file"],
         index=0,
         horizontal=True,
     )
 
-    source = None
-    tmp_path_to_cleanup = None
+    source: str | None = None
+    tmp_path_to_cleanup: str | None = None
 
     if input_mode == "YouTube URL":
-        source = st.text_input(
+        raw_url = st.text_input(
             "Video URL",
             placeholder="https://youtube.com/watch?v=...",
-            help="Paste a public YouTube video URL.",
+            help="Paste any public YouTube video URL.",
         ).strip()
+        source = raw_url or None
     else:
-        uploaded_file = st.file_uploader(
-            "Audio or video file",
-            type=["mp4", "mp3", "wav", "m4a", "mov", "mkv", "webm"],
-            help="Supported files are converted to WAV before transcription.",
+        uploaded = st.file_uploader(
+            "Audio / Video file",
+            type=["mp4", "mp3", "wav", "m4a", "mov", "mkv", "webm", "ogg"],
+            help="Converted to 16 kHz WAV before transcription.",
         )
-        if uploaded_file is not None:
-            suffix = os.path.splitext(uploaded_file.name)[1]
-            tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-            tmp_file.write(uploaded_file.read())
-            tmp_file.close()
-            source = tmp_file.name
-            tmp_path_to_cleanup = tmp_file.name
-            st.caption(f"Selected: {uploaded_file.name}")
+        if uploaded is not None:
+            suffix = os.path.splitext(uploaded.name)[1]
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+            tmp.write(uploaded.read())
+            tmp.close()
+            source = tmp.name
+            tmp_path_to_cleanup = tmp.name
+            st.caption(f"📎 {uploaded.name}")
 
     language = st.selectbox(
-        "Audio language",
+        "🌐 Audio language",
         ["english", "hindi", "hinglish"],
         index=0,
-        help="Hindi and Hinglish are translated to English during transcription.",
+        help=(
+            "Hindi and Hinglish are automatically translated to English "
+            "during transcription using Whisper's translate mode."
+        ),
     )
 
     st.divider()
 
     run_clicked = st.button(
-        "Run analysis",
+        "🚀 Run Analysis",
         type="primary",
         use_container_width=True,
         disabled=st.session_state.processing or not source,
     )
 
     if st.session_state.result:
-        if st.button("Start over", use_container_width=True):
-            st.session_state.result = None
-            st.session_state.chat_history = []
-            st.session_state.status_history = []
-            st.session_state.pending_question = None
+        if st.button("🔄 Start Over", use_container_width=True):
+            for key in ("result", "chat_history", "status_history", "pending_question", "error_message"):
+                st.session_state[key] = [] if key in ("chat_history", "status_history") else None
             st.rerun()
 
     st.divider()
-    st.caption("Tip: use shorter files while testing. Whisper and embeddings can take time on CPU.")
+    st.markdown(
+        "<p style='color:#475569;font-size:.78rem;'>"
+        "💡 <b>Tip:</b> Use shorter clips for faster testing. "
+        "Whisper runs locally and can take a few minutes on CPU."
+        "</p>",
+        unsafe_allow_html=True,
+    )
 
+
+# ── Pipeline execution ────────────────────────────────────────────────────────
 
 if run_clicked and source:
     st.session_state.processing = True
     st.session_state.chat_history = []
     st.session_state.status_history = []
+    st.session_state.error_message = None
 
-    status_box = st.empty()
-    progress_bar = st.progress(0, text="Starting")
-    total_steps = 8
-    steps_seen = {"count": 0}
+    TOTAL_STEPS = 8
+    step_count = {"n": 0}
+    status_placeholder = st.empty()
+    progress_bar = st.progress(0, text="Starting analysis …")
 
-    def progress_cb(message: str):
-        steps_seen["count"] += 1
-        pct = min(int(steps_seen["count"] / total_steps * 100), 96)
+    def _progress_cb(message: str):
+        step_count["n"] += 1
+        pct = min(int(step_count["n"] / TOTAL_STEPS * 100), 95)
         st.session_state.status_history.append(message)
         progress_bar.progress(pct, text=message)
-        status_box.info(message)
+        status_placeholder.info(message)
 
     try:
-        with st.spinner("Processing your video. This can take a few minutes."):
-            result = run_pipeline(source, language, progress_cb=progress_cb)
+        with st.spinner("Processing your video — this may take a few minutes …"):
+            result = run_pipeline(source, language, progress_cb=_progress_cb)
         st.session_state.result = result
-        progress_bar.progress(100, text="Analysis complete")
-        status_box.success("Analysis complete")
-    except Exception as error:
-        st.session_state.result = None
-        status_box.error(f"Something went wrong: {error}")
+        progress_bar.progress(100, text="✅ Analysis complete!")
+        status_placeholder.success("Analysis complete! Scroll down to explore your results.")
+    except EnvironmentError as env_err:
+        st.session_state.error_message = (
+            f"**Configuration error:** {env_err}\n\n"
+            "Please check your `.env` file and make sure `MISTRAL_API_KEY` is set."
+        )
+        status_placeholder.empty()
+        progress_bar.empty()
+    except Exception as exc:
+        logger.exception("Pipeline failed")
+        st.session_state.error_message = f"**Pipeline error:** {exc}"
+        status_placeholder.empty()
+        progress_bar.empty()
     finally:
         st.session_state.processing = False
+        # Clean up uploaded temp file
         if tmp_path_to_cleanup and os.path.exists(tmp_path_to_cleanup):
             try:
                 os.remove(tmp_path_to_cleanup)
             except OSError:
                 pass
 
+# Surface errors prominently
+if st.session_state.get("error_message"):
+    st.error(st.session_state.error_message)
+
+# ── Main display ──────────────────────────────────────────────────────────────
 
 result = st.session_state.result
 
 if not result:
+    # ── Landing / welcome screen ──────────────────────────────────────────────
     st.markdown(
         """
         <section class="hero">
-            <h1>Turn videos into usable meeting intelligence.</h1>
+            <div class="hero-badge">✦ MCA Minor Project</div>
+            <h1>Turn videos into<br>actionable intelligence.</h1>
             <p>
-                Upload a recording or paste a YouTube URL, then get an English transcript,
-                a professional summary, action items, decisions, open questions, and a chat
-                assistant grounded in the transcript.
+                Upload a recording or paste a YouTube URL to get a full English transcript,
+                professional summary, action items, key decisions, open questions, and an
+                AI chat assistant grounded in the transcript — all in one click.
             </p>
         </section>
         """,
         unsafe_allow_html=True,
     )
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.markdown(
-            '<div class="panel"><h3>1. Add a source</h3><p class="muted">Paste a URL or upload an audio/video file from the sidebar.</p></div>',
-            unsafe_allow_html=True,
-        )
-    with col2:
-        st.markdown(
-            '<div class="panel"><h3>2. Run analysis</h3><p class="muted">The app transcribes, summarizes, and builds a searchable chat index.</p></div>',
-            unsafe_allow_html=True,
-        )
-    with col3:
-        st.markdown(
-            '<div class="panel"><h3>3. Export or ask</h3><p class="muted">Download a report, search the transcript, or ask questions in chat.</p></div>',
-            unsafe_allow_html=True,
-        )
+    c1, c2, c3 = st.columns(3)
+    cards = [
+        ("🎯", "STEP 1", "Add a source", "Paste a YouTube URL or upload an audio/video file from the sidebar."),
+        ("⚡", "STEP 2", "Run analysis", "The app transcribes with Whisper, summarises, extracts insights, and builds a chat index."),
+        ("📤", "STEP 3", "Explore & export", "Download a Markdown report, search the transcript, or ask questions in the AI chat."),
+    ]
+    for col, (emoji, step, title, desc) in zip([c1, c2, c3], cards):
+        with col:
+            st.markdown(
+                f"""<div class="feature-card">
+                    <div class="feature-emoji">{emoji}</div>
+                    <div class="step-num">{step}</div>
+                    <h3>{title}</h3>
+                    <p>{desc}</p>
+                </div>""",
+                unsafe_allow_html=True,
+            )
 
     if st.session_state.status_history:
-        with st.expander("Last run progress"):
-            for item in st.session_state.status_history:
-                st.write(f"- {item}")
+        with st.expander("📋 Last run — processing log"):
+            for i, item in enumerate(st.session_state.status_history, 1):
+                st.write(f"{i}. {item}")
+
 else:
+    # ── Results screen ────────────────────────────────────────────────────────
     stats = transcript_stats(result["transcript"])
-    report = build_markdown_report(result)
+    md_report = build_markdown_report(result)
     filename_base = safe_filename(result["title"])
     title_html = escape(result["title"])
 
+    # Hero banner (results)
     st.markdown(
         f"""
         <section class="hero">
-            <p class="muted">Analysis ready · {result.get("created_at", "")}</p>
+            <div class="hero-badge">✅ Analysis ready · {result.get("created_at", "")}</div>
             <h1>{title_html}</h1>
-            <p>Review the summary, inspect the transcript, export the report, or ask focused questions about the video.</p>
+            <p>Review the summary below, explore the transcript, export your report, or ask the AI assistant questions about the video.</p>
         </section>
         """,
         unsafe_allow_html=True,
     )
 
+    # Stat cards
     st.markdown(
         f"""
         <div class="stat-grid">
-            <div class="stat-card"><div class="stat-label">Words</div><div class="stat-value">{stats["words"]:,}</div></div>
-            <div class="stat-card"><div class="stat-label">Characters</div><div class="stat-value">{stats["characters"]:,}</div></div>
-            <div class="stat-card"><div class="stat-label">Reading Time</div><div class="stat-value">{stats["reading_time"]} min</div></div>
-            <div class="stat-card"><div class="stat-label">Language Mode</div><div class="stat-value">{result.get("language", "english").title()}</div></div>
+            <div class="stat-card">
+                <div class="stat-label">Words</div>
+                <div class="stat-value">{stats["words"]:,}</div>
+                <div class="stat-icon">📝</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Sentences</div>
+                <div class="stat-value">{stats["sentences"]:,}</div>
+                <div class="stat-icon">💬</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Reading time</div>
+                <div class="stat-value">{stats["reading_time"]} min</div>
+                <div class="stat-icon">⏱️</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Language</div>
+                <div class="stat-value">{result.get("language", "english").title()}</div>
+                <div class="stat-icon">🌐</div>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    export_col1, export_col2, export_col3 = st.columns([1, 1, 2])
-    with export_col1:
+    # Export row
+    exp1, exp2, exp3 = st.columns([1, 1, 2])
+    with exp1:
         st.download_button(
-            "Download report",
-            data=report,
+            "📥 Download report (.md)",
+            data=md_report,
             file_name=f"{filename_base}_report.md",
             mime="text/markdown",
             use_container_width=True,
         )
-    with export_col2:
+    with exp2:
         st.download_button(
-            "Download transcript",
+            "📄 Download transcript (.txt)",
             data=result["transcript"],
             file_name=f"{filename_base}_transcript.txt",
             mime="text/plain",
             use_container_width=True,
         )
-    with export_col3:
+    with exp3:
         if st.session_state.status_history:
-            with st.expander("Processing timeline"):
-                for index, item in enumerate(st.session_state.status_history, start=1):
-                    st.write(f"{index}. {item}")
+            with st.expander("🕐 Processing timeline"):
+                for i, item in enumerate(st.session_state.status_history, 1):
+                    st.write(f"{i}. {item}")
 
+    # ── Tabs ──────────────────────────────────────────────────────────────────
     tab_summary, tab_transcript, tab_chat = st.tabs(
-        ["Summary", "Transcript", "Chat"]
+        ["📋  Summary", "📝  Transcript", "💬  Chat"]
     )
 
+    # ── Summary tab ───────────────────────────────────────────────────────────
     with tab_summary:
-        st.subheader("Professional Summary")
+        st.subheader("Professional Meeting Summary")
         st.markdown(result["summary"])
 
-        insight_col1, insight_col2, insight_col3 = st.columns(3)
-        with insight_col1:
+        st.divider()
+        ins1, ins2, ins3 = st.columns(3)
+        with ins1:
             with st.container(border=True):
-                st.subheader("Action Items")
+                st.markdown("#### ✅ Action Items")
                 st.markdown(result["action_item"])
-        with insight_col2:
+        with ins2:
             with st.container(border=True):
-                st.subheader("Key Decisions")
+                st.markdown("#### 🔑 Key Decisions")
                 st.markdown(result["key_decisions"])
-        with insight_col3:
+        with ins3:
             with st.container(border=True):
-                st.subheader("Open Questions")
+                st.markdown("#### ❓ Open Questions")
                 st.markdown(result["open_questions"])
 
+    # ── Transcript tab ────────────────────────────────────────────────────────
     with tab_transcript:
-        search_term = st.text_input("Search transcript", placeholder="Type a word or phrase")
+        search_term = st.text_input(
+            "🔍 Search transcript",
+            placeholder="Type a word or phrase to find …",
+        )
         transcript_text = result["transcript"]
 
         if search_term:
-            matches = [m.start() for m in re.finditer(re.escape(search_term), transcript_text, re.IGNORECASE)]
-            st.caption(f"{len(matches)} match(es) found")
+            pattern = re.compile(re.escape(search_term), re.IGNORECASE)
+            matches = list(pattern.finditer(transcript_text))
             if matches:
-                first = matches[0]
-                start = max(0, first - 350)
-                end = min(len(transcript_text), first + 650)
-                st.text_area(
-                    "First match context",
-                    transcript_text[start:end],
-                    height=180,
+                st.success(f"Found **{len(matches)}** match(es).")
+                first = matches[0].start()
+                ctx_start = max(0, first - 300)
+                ctx_end = min(len(transcript_text), first + 600)
+                # Highlight the match inside the context
+                ctx = transcript_text[ctx_start:ctx_end]
+                highlighted = pattern.sub(
+                    lambda m: f"**{m.group()}**", ctx
                 )
+                st.markdown(
+                    f"**First match context:**\n\n…{highlighted}…"
+                )
+            else:
+                st.warning(f'No matches found for "{search_term}".')
 
         st.text_area(
             "Full transcript",
             transcript_text,
-            height=520,
+            height=550,
+            label_visibility="collapsed",
         )
 
+    # ── Chat tab ──────────────────────────────────────────────────────────────
     with tab_chat:
-        st.subheader("Ask the transcript")
-        st.caption("Answers are based on the indexed transcript context.")
+        st.subheader("💬 Chat with the Transcript")
+        st.caption(
+            "Ask any question — answers are grounded in the indexed transcript context."
+        )
 
-        prompt_col1, prompt_col2, prompt_col3 = st.columns(3)
+        # Sample question buttons
         sample_questions = [
             "What are the main takeaways?",
             "What action items were assigned?",
-            "What risks or concerns were discussed?",
+            "What risks or concerns were raised?",
+            "Who were the key speakers?",
         ]
-        for column, sample in zip([prompt_col1, prompt_col2, prompt_col3], sample_questions):
-            with column:
-                if st.button(sample, use_container_width=True):
-                    st.session_state.pending_question = sample
+        btn_cols = st.columns(len(sample_questions))
+        for col, sq in zip(btn_cols, sample_questions):
+            with col:
+                if st.button(sq, use_container_width=True, key=f"sq_{sq[:15]}"):
+                    st.session_state.pending_question = sq
                     st.rerun()
 
-        if st.button("Clear chat"):
-            st.session_state.chat_history = []
-            st.session_state.pending_question = None
-            st.rerun()
+        col_clear, _ = st.columns([1, 4])
+        with col_clear:
+            if st.button("🗑️ Clear chat", use_container_width=True):
+                st.session_state.chat_history = []
+                st.session_state.pending_question = None
+                st.rerun()
 
-        for question_text, answer_text in st.session_state.chat_history:
+        st.divider()
+
+        # Render chat history
+        for q_text, a_text in st.session_state.chat_history:
             with st.chat_message("user"):
-                st.write(question_text)
+                st.write(q_text)
             with st.chat_message("assistant"):
-                st.write(answer_text)
+                st.write(a_text)
 
-        question = st.session_state.pending_question or st.chat_input("Ask something about this video")
+        # Accept new question
+        question = (
+            st.session_state.pending_question
+            or st.chat_input("Ask something about this video …")
+        )
         st.session_state.pending_question = None
 
         if question:
             with st.chat_message("user"):
                 st.write(question)
             with st.chat_message("assistant"):
-                with st.spinner("Searching the transcript"):
+                with st.spinner("Searching the transcript …"):
                     try:
                         answer = ask_question(result["rag_chain"], question)
-                    except Exception as error:
-                        answer = f"Error answering question: {error}"
+                    except Exception as exc:
+                        logger.exception("RAG error")
+                        answer = f"⚠️ Error generating answer: {exc}"
                 st.write(answer)
             st.session_state.chat_history.append((question, answer))
